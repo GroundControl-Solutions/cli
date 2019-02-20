@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.8)
 project(cli VERSION 1.0 LANGUAGES CXX)
 
 option(CLI_BuildSamples "Build the samples." OFF)
+option(CLI_Install "Configure the Install target. Requires exported Boost." OFF)
 
 find_package(Boost 1.55 REQUIRED COMPONENTS system)
 find_package(Threads REQUIRED)
@@ -27,6 +28,8 @@ if (CLI_BuildSamples)
 endif()
 
 # Install
+if (CLI_Install)
+
 install(DIRECTORY include/ DESTINATION	include)
 
 include(CMakePackageConfigHelpers)
@@ -43,3 +46,5 @@ install(
 	FILES "${CMAKE_CURRENT_BINARY_DIR}/cliConfig.cmake"
 	DESTINATION "lib/cmake/cli"
 )
+
+endif()
