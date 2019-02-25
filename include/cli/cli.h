@@ -35,10 +35,16 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <tuple>
 #include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string.hpp>
 #include "colorprofile.h"
 #include "history.h"
+
+#if __cplusplus < 201703L
+	// Provides std::apply implementation
+	#include "experimental17/tuple.h"
+#endif
 
 namespace cli
 {
@@ -352,20 +358,8 @@ namespace cli
 
     private:
 
-        template < typename F, typename R >
-        void Add( const std::string& name, const std::string& help, F& f,R (F::*mf)(std::ostream& out) const );
-
-        template < typename F, typename R, typename A1 >
-        void Add( const std::string& name, const std::string& help, F& f,R (F::*mf)(A1, std::ostream& out) const );
-
-        template < typename F, typename R, typename A1, typename A2 >
-        void Add( const std::string& name, const std::string& help, F& f,R (F::*mf)(A1, A2, std::ostream& out) const );
-
-        template < typename F, typename R, typename A1, typename A2, typename A3 >
-        void Add( const std::string& name, const std::string& help, F& f,R (F::*mf)(A1, A2, A3, std::ostream& out) const );
-
-        template < typename F, typename R, typename A1, typename A2, typename A3, typename A4 >
-        void Add( const std::string& name, const std::string& help, F& f,R (F::*mf)(A1, A2, A3, A4, std::ostream& out) const );
+        template < typename F, typename R, typename ...As >
+        void Add( const std::string& name, const std::string& help, F& f,R (F::*mf)(std::ostream& out, As...) const );
 
         Menu* parent;
         const std::string description;
@@ -375,6 +369,61 @@ namespace cli
 
     // ********************************************************************
 
+	template<size_t... S>
+	auto tie(const vector<string>& vec, index_sequence<S...>)
+	{
+		return std::tie(vec.at(S)...);
+	}
+
+	template<class... Args1, class... Args2>
+	auto make_param_tuple_(std::tuple<Args1...>*, Args2&&... args2)
+	{
+		return std::tuple<Args1...>{boost::lexical_cast<Args1>(args2)...};
+	}
+
+	template<class... Args>
+	auto make_param_tuple(const std::vector<string>& vec)
+	{
+		auto strs = tie(vec, std::make_index_sequence<sizeof...(Args)>());
+		return experimental::apply([&](auto&&... args){
+			return make_param_tuple_(static_cast<std::tuple<Args...>*>(nullptr), args...);
+		}, strs);
+	}
+
+	template <size_t I>
+	struct describe_impl
+	{
+		template <typename T>
+		static void describe(T& tup, size_t idx, std::ostream & out)
+		{
+			if (idx == I - 1) out << " " << TypeDesc<std::decay_t<decltype(std::get<I - 1>(tup))>>::Name();
+			else describe_impl<I - 1>::describe(tup, idx, out);
+		}
+	};
+
+	template <>
+	struct describe_impl<0>
+	{
+		template <typename T>
+		static void describe(T&, size_t, std::ostream &) { assert(false); }
+	};
+
+	template <typename... Ts>
+	void describe_at(std::tuple<Ts...> const& tup, size_t idx, std::ostream & out)
+	{
+		describe_impl<sizeof...(Ts)>::describe(tup, idx, out);
+	}
+
+	template <typename ...Ts>
+	void describe(std::ostream & out)
+	{
+		constexpr auto s = sizeof...(Ts);
+		for (size_t i = 0; i < s; ++i) {
+			describe_at(std::tuple<Ts...>{}, i, out);
+		}
+	}
+
+    template <typename ExecF, typename ...Ts>
     class FuncCmd : public Command
     {
     public:
@@ -382,57 +431,24 @@ namespace cli
         FuncCmd( const FuncCmd& ) = delete;
         FuncCmd& operator = ( const FuncCmd& ) = delete;
 
+		template <typename F>
         FuncCmd(
             const std::string& _name,
-            std::function< void( std::ostream& )> _function,
+            F && _function,
             const std::string& desc = ""
-        ) : Command( _name ), function( _function ), description( desc )
+			) : Command( _name ), function( std::forward<F>(_function) ), description( desc )
         {
         }
-        bool Exec( const std::vector< std::string >& cmdLine, CliSession& session ) override
+        bool Exec(const std::vector<std::string> & cmdLine, CliSession & session) override
         {
-            if ( cmdLine.size() != 1 ) return false;
-            if ( cmdLine[ 0 ] == Name() )
-            {
-                function( session.OutStream() );
-                return true;
-            }
-
-            return false;
-        }
-        void Help( std::ostream& out ) const override
-        {
-            out << " - " << Name() << "\n\t" << description << "\n";
-        }
-    private:
-        const std::function< void( std::ostream& )> function;
-        const std::string description;
-    };
-
-    template < typename T >
-    class FuncCmd1 : public Command
-    {
-    public:
-        // disable value semantics
-        FuncCmd1( const FuncCmd1& ) = delete;
-        FuncCmd1& operator = ( const FuncCmd1& ) = delete;
-
-        FuncCmd1(
-            const std::string& _name,
-            std::function< void( T, std::ostream& ) > _function,
-            const std::string& desc = ""
-            ) : Command( _name ), function( _function ), description( desc )
-        {
-        }
-        bool Exec( const std::vector< std::string >& cmdLine, CliSession& session ) override
-        {
-            if ( cmdLine.size() != 2 ) return false;
-            if ( Name() == cmdLine[ 0 ] )
+            if ( cmdLine.size() != sizeof...(Ts) + 1 ) return false;
+            if ( Name() == cmdLine[0] )
             {
                 try
                 {
-                    T arg = boost::lexical_cast<T>( cmdLine[ 1 ] );
-                    function( arg, session.OutStream() );
+					auto b = cmdLine.begin();
+					auto args = std::tuple_cat(std::tuple<std::ostream&>(session.OutStream()), make_param_tuple<Ts...>({++b, cmdLine.end()}));
+					experimental::apply(function, std::move(args));
                 }
                 catch ( boost::bad_lexical_cast & )
                 {
@@ -445,159 +461,15 @@ namespace cli
         }
         void Help( std::ostream& out ) const override
         {
-            out << " - " << Name()
-                << " " << TypeDesc< T >::Name()
-                << "\n\t" << description << "\n";
+			out << " - " << Name();
+			describe<Ts...>(out);
+			if (!description.empty()) {
+				out << std::endl << "\t" << description << std::endl;
+			}
+			out << std::endl;
         }
     private:
-        const std::function< void( T, std::ostream& )> function;
-        const std::string description;
-    };
-
-    template < typename T1, typename T2 >
-    class FuncCmd2 : public Command
-    {
-    public:
-        // disable value semantics
-        FuncCmd2( const FuncCmd2& ) = delete;
-        FuncCmd2& operator = ( const FuncCmd2& ) = delete;
-
-        FuncCmd2(
-            const std::string& _name,
-            std::function< void( T1, T2, std::ostream& ) > _function,
-            const std::string& desc = "2 parameter command"
-            ) : Command( _name ), function( _function ), description( desc )
-        {
-        }
-        bool Exec( const std::vector< std::string >& cmdLine, CliSession& session ) override
-        {
-            if ( cmdLine.size() != 3 ) return false;
-            if ( Name() == cmdLine[ 0 ] )
-            {
-                try
-                {
-                    T1 arg1 = boost::lexical_cast<T1>( cmdLine[ 1 ] );
-                    T2 arg2 = boost::lexical_cast<T2>( cmdLine[ 2 ] );
-                    function( arg1, arg2, session.OutStream() );
-                }
-                catch ( boost::bad_lexical_cast & )
-                {
-                    return false;
-                }
-                return true;
-            }
-
-            return false;
-        }
-        void Help( std::ostream& out ) const override
-        {
-            out << " - " << Name()
-                << " " << TypeDesc< T1 >::Name()
-                << " " << TypeDesc< T2 >::Name()
-                << "\n\t" << description << "\n";
-        }
-    private:
-        const std::function< void( T1, T2, std::ostream& )> function;
-        const std::string description;
-    };
-
-    template < typename T1, typename T2, typename T3 >
-    class FuncCmd3 : public Command
-    {
-    public:
-        // disable value semantics
-        FuncCmd3( const FuncCmd3& ) = delete;
-        FuncCmd3& operator = ( const FuncCmd3& ) = delete;
-
-        FuncCmd3(
-            const std::string& _name,
-            std::function< void( T1, T2, T3, std::ostream& ) > _function,
-            const std::string& desc = "3 parameters command"
-            ) : Command( _name ), function( _function ), description( desc )
-        {
-        }
-        bool Exec( const std::vector< std::string >& cmdLine, CliSession& session ) override
-        {
-            if ( cmdLine.size() != 4 ) return false;
-            if ( Name() == cmdLine[ 0 ] )
-            {
-                try
-                {
-                    T1 arg1 = boost::lexical_cast<T1>( cmdLine[ 1 ] );
-                    T2 arg2 = boost::lexical_cast<T2>( cmdLine[ 2 ] );
-                    T3 arg3 = boost::lexical_cast<T3>( cmdLine[ 3 ] );
-                    function( arg1, arg2, arg3, session.OutStream() );
-                }
-                catch ( boost::bad_lexical_cast & )
-                {
-                    return false;
-                }
-                return true;
-            }
-
-            return false;
-        }
-        void Help( std::ostream& out ) const override
-        {
-            out << " - " << Name()
-                << " " << TypeDesc< T1 >::Name()
-                << " " << TypeDesc< T2 >::Name()
-                << " " << TypeDesc< T3 >::Name()
-                << "\n\t" << description << "\n";
-        }
-    private:
-        const std::function< void( T1, T2, T3, std::ostream& )> function;
-        const std::string description;
-    };
-
-    template < typename T1, typename T2, typename T3, typename T4 >
-    class FuncCmd4 : public Command
-    {
-    public:
-        // disable value semantics
-        FuncCmd4( const FuncCmd4& ) = delete;
-        FuncCmd4& operator = ( const FuncCmd4& ) = delete;
-
-        FuncCmd4(
-            const std::string& _name,
-            std::function< void( T1, T2, T3, T4, std::ostream& ) > _function,
-            const std::string& desc = "4 parameters command"
-            ) : Command( _name ), function( _function ), description( desc )
-        {
-        }
-        bool Exec( const std::vector< std::string >& cmdLine, CliSession& session ) override
-        {
-            if ( cmdLine.size() != 5 ) return false;
-            if ( Name() == cmdLine[ 0 ] )
-            {
-                try
-                {
-                    T1 arg1 = boost::lexical_cast<T1>( cmdLine[ 1 ] );
-                    T2 arg2 = boost::lexical_cast<T2>( cmdLine[ 2 ] );
-                    T3 arg3 = boost::lexical_cast<T3>( cmdLine[ 3 ] );
-                    T4 arg4 = boost::lexical_cast<T4>( cmdLine[ 4 ] );
-                    function( arg1, arg2, arg3, arg4, session.OutStream() );
-                }
-                catch ( boost::bad_lexical_cast & )
-                {
-                    return false;
-                }
-                return true;
-            }
-
-            return false;
-        }
-        void Help( std::ostream& out ) const override
-        {
-            out << " - " << Name()
-                << " " << TypeDesc< T1 >::Name()
-                << " " << TypeDesc< T2 >::Name()
-                << " " << TypeDesc< T3 >::Name()
-                << " " << TypeDesc< T4 >::Name()
-                << "\n\t" << description << "\n";
-        }
-    private:
-        const std::function< void( T1, T2, T3, T4, std::ostream& )> function;
+        const ExecF function;
         const std::string description;
     };
 
@@ -688,34 +560,10 @@ namespace cli
 
     // Menu implementation
 
-    template < typename F, typename R >
-    void Menu::Add( const std::string& name, const std::string& help, F& f,R (F::*)(std::ostream& out) const )
+    template < typename F, typename R, typename ...As >
+    void Menu::Add( const std::string& name, const std::string& help, F& f,R (F::*)(std::ostream& out, As...) const )
     {
-        cmds.push_back( std::make_unique< FuncCmd >( name, f, help ) );
-    }
-
-    template < typename F, typename R, typename A1 >
-    void Menu::Add( const std::string& name, const std::string& help, F& f,R (F::*)(A1, std::ostream& out) const )
-    {
-        cmds.push_back( std::make_unique< FuncCmd1< A1 > >( name, f, help ) );
-    }
-
-    template < typename F, typename R, typename A1, typename A2 >
-    void Menu::Add( const std::string& name, const std::string& help, F& f,R (F::*)(A1, A2, std::ostream& out) const )
-    {
-        cmds.push_back( std::make_unique< FuncCmd2< A1, A2 > >( name, f, help ) );
-    }
-
-    template < typename F, typename R, typename A1, typename A2, typename A3 >
-    void Menu::Add( const std::string& name, const std::string& help, F& f,R (F::*)(A1, A2, A3, std::ostream& out) const )
-    {
-        cmds.push_back( std::make_unique< FuncCmd3< A1, A2, A3 > >( name, f, help ) );
-    }
-
-    template < typename F, typename R, typename A1, typename A2, typename A3, typename A4 >
-    void Menu::Add( const std::string& name, const std::string& help, F& f,R (F::*)(A1, A2, A3, A4, std::ostream& out) const )
-    {
-        cmds.push_back( std::make_unique< FuncCmd4< A1, A2, A3, A4> >( name, f, help ) );
+        cmds.push_back( std::make_unique< FuncCmd< F, As... > >( name, f, help ) );
     }
 
 } // namespace
